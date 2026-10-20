@@ -1,0 +1,8 @@
+{
+  "customer_id": "<YOUR_CHRONICLE_CUSTOMER_UUID>",
+  "project_id": "<YOUR_GCP_PROJECT_ID>",
+  "region": "us",
+  "gcp_region": "us-central1",
+  "account": "<YOUR_GCLOUD_ACCOUNT>",
+  "mcp_endpoint": "https://chronicle.us.rep.googleapis.com/mcp"
+}

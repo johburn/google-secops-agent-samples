@@ -1,0 +1,118 @@
+{
+  "playbook_name": "UC03_ADK_Autonomous_HITL_User_Verifier_And_UDM_CrossCheck",
+  "version": "1.0.0",
+  "description": "Playbook de Google Cloud SecOps SOAR que invoca al sistema Multi-Agente Google ADK (Cloud Run) para entrevistar al empleado por Chat, inspeccionar respuestas con Model Armor, contrastar la coartada en tiempo real contra UDM (`udm_search`) y ejecutar contención IAM/EDR o cierre automático.",
+  "is_enabled": true,
+  "priority": 1,
+  "environments": ["Default Environment", "Production SOC"],
+  "trigger": {
+    "type": "ALERT_TRIGGER_VALUE",
+    "operator": "OR",
+    "conditions": [
+      {
+        "field": "RuleGenerator",
+        "operator": "CONTAINS",
+        "value": "Anomalous Mass Cloud Storage & Confidential File Exfiltration"
+      },
+      {
+        "field": "RuleGenerator",
+        "operator": "CONTAINS",
+        "value": "Unusual Large Outbound Archive Transfer"
+      },
+      {
+        "field": "RuleGenerator",
+        "operator": "CONTAINS",
+        "value": "Suspicious OAuth Token & Admin SSH Key Creation"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "step_id": "step_1_invoke_adk_verifier",
+      "instance_name": "ADK_Verifier",
+      "action_provider": "GoogleADKAgenticSOC",
+      "action_name": "Invoke ADK Autonomous HITL Verifier",
+      "description": "Llama al endpoint Cloud Run del Agente ADK (`POST /api/v1/soar/verify-user`) con los placeholders dinámicos del caso y alerta.",
+      "parameters": {
+        "ADK Cloud Run Endpoint URL": "https://adk-soar-hitl-verifier-uc03.a.run.app/api/v1/soar/verify-user",
+        "Request Payload JSON": {
+          "soar_context": {
+            "project_id": "tu-gcp-project-id",
+            "customer_id": "tu-chronicle-customer-uuid",
+            "region": "us",
+            "case_id": "[Case.Id]",
+            "alert_id": "[Alert.Identifier]",
+            "alert_name": "[Alert.Name]",
+            "rule_id": "[Alert.RuleId]"
+          },
+          "entity_to_verify": {
+            "user_email": "[Entity.Identifier]",
+            "hostname": "[Alert.PrincipalHostname]",
+            "source_ip": "[Alert.PrincipalIp]"
+          },
+          "execution_mode": "SYNC_DEMO"
+        }
+      },
+      "next_step": "step_2_condition_evaluate_verdict"
+    },
+    {
+      "step_id": "step_2_condition_evaluate_verdict",
+      "instance_name": "Evaluate_ADK_Verdict",
+      "type": "CONDITION",
+      "description": "Evalúa el `ScriptResult` JSON devuelto por el Agente ADK para decidir entre Contención Crítica o Cierre Benigno.",
+      "branches": [
+        {
+          "branch_id": "branch_1_compromised_containment",
+          "branch_name": "EXECUTE_IDENTITY_CONTAINMENT",
+          "condition_expression": "[ADK_Verifier.JsonResult.verdict] == \"COMPROMISED_ACCOUNT\" OR [ADK_Verifier.JsonResult.prompt_injection_detected] == true",
+          "actions": [
+            {
+              "step_id": "step_3a_suspend_user_iam",
+              "action_provider": "GoogleWorkspaceIAM",
+              "action_name": "Suspend User & Revoke Active OAuth Tokens",
+              "parameters": {
+                "User Email": "[ADK_Verifier.JsonResult.containment_targets.suspend_user]",
+                "Revoke OAuth Sessions": true,
+                "Reset MFA": true
+              }
+            },
+            {
+              "step_id": "step_3b_isolate_endpoint",
+              "action_provider": "ChronicleEDR",
+              "action_name": "Isolate Host Endpoint",
+              "parameters": {
+                "Hostname": "[ADK_Verifier.JsonResult.containment_targets.isolate_hostname]",
+                "Reason": "ADK HITL Verification failed: Alibi contradicted UDM telemetry or Prompt Injection detected."
+              }
+            },
+            {
+              "step_id": "step_3c_block_external_ip",
+              "action_provider": "GoogleCloudArmor",
+              "action_name": "Block Malicious Source IP",
+              "parameters": {
+                "IP Address": "[ADK_Verifier.JsonResult.containment_targets.block_ip]"
+              }
+            }
+          ]
+        },
+        {
+          "branch_id": "branch_2_verified_benign_close",
+          "branch_name": "CLOSE_BENIGN_CASE",
+          "condition_expression": "[ADK_Verifier.JsonResult.verdict] == \"VERIFIED_BENIGN\" AND [ADK_Verifier.JsonResult.interview_summary.alibi_matches_telemetry] == true",
+          "actions": [
+            {
+              "step_id": "step_4a_close_case",
+              "action_provider": "Siemplify",
+              "action_name": "Close Case",
+              "parameters": {
+                "Reason": "NOT_MALICIOUS",
+                "Root Cause": "Authorized Admin Work",
+                "Comment": "Cerrado automáticamente tras verificación HITL conversacional y contraste positivo en SecOps UDM."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
